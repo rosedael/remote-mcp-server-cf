@@ -2,57 +2,273 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-// Define our MCP agent with tools
-export class MyMCP extends McpAgent {
+export interface Env {
+	COMPLIQ_API_KEY: string;
+}
+
+export class MyMCP extends McpAgent<Env> {
 	server = new McpServer({
-		name: "Authless Calculator",
+		name: "COMPLiQ MCP Server",
 		version: "1.0.0",
 	});
 
 	async init() {
-		// Simple addition tool
+		// Tool 1: Input Prompt (Request) - Mandatory
 		this.server.tool(
-			"add",
-			{ a: z.number(), b: z.number() },
-			async ({ a, b }) => ({
-				content: [{ type: "text", text: String(a + b) }],
-			})
+			"inputPrompt",
+			{
+				sessionId: z.string().max(100).describe("Session identifier"),
+				correlationId: z.string().max(100).describe("Correlation ID"),
+				content: z.string().max(40000).describe("User input prompt text"),
+				userId: z.string().max(100).describe("User identifier"),
+				timestamp: z.string().describe("Request timestamp (MM-DD-YYYY HH:MM:SS)"),
+			},
+			async ({ sessionId, correlationId, content, userId, timestamp }) => {
+				try {
+					const formData = new FormData();
+					formData.append("sessionId", sessionId);
+					formData.append("correlationId", correlationId);
+					formData.append("content", content);
+					formData.append("userId", userId);
+					formData.append("timestamp", timestamp);
+
+					const response = await fetch("https://ai-stage-be.compliq.io/v1/actions/task-input", {
+						method: "POST",
+						headers: {
+							"Authorization": `x-api-key ${this.env.COMPLIQ_API_KEY}`,
+						},
+						body: formData,
+					});
+
+					if (!response.ok) {
+						const errorText = await response.text();
+						return {
+							content: [{ type: "text", text: `Error: ${response.status} - ${errorText}` }],
+						};
+					}
+
+					const result = await response.json();
+					return {
+						content: [{ type: "text", text: JSON.stringify(result) }],
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Error: ${error.message}` }],
+					};
+				}
+			}
 		);
 
-		// Calculator tool with multiple operations
+		// Tool 2: Add File to Request - Optional
 		this.server.tool(
-			"calculate",
+			"addFile",
 			{
-				operation: z.enum(["add", "subtract", "multiply", "divide"]),
-				a: z.number(),
-				b: z.number(),
+				sessionId: z.string().max(100).describe("Session identifier"),
+				correlationId: z.string().max(100).describe("Correlation ID"),
+				fileBase64: z.string().describe("Base64 encoded file data"),
+				fileName: z.string().describe("Name of the file"),
+				fileContentType: z.string().describe("Content type of the file (png, jpeg, mp3, mp4, docx, pdf, csv, xml, ogg)"),
+				userId: z.string().max(100).optional().describe("User identifier"),
+				timestamp: z.string().describe("Request timestamp (MM-DD-YYYY HH:MM:SS)"),
 			},
-			async ({ operation, a, b }) => {
-				let result: number;
-				switch (operation) {
-					case "add":
-						result = a + b;
-						break;
-					case "subtract":
-						result = a - b;
-						break;
-					case "multiply":
-						result = a * b;
-						break;
-					case "divide":
-						if (b === 0)
-							return {
-								content: [
-									{
-										type: "text",
-										text: "Error: Cannot divide by zero",
-									},
-								],
-							};
-						result = a / b;
-						break;
+			async ({ sessionId, correlationId, fileBase64, fileName, fileContentType, userId, timestamp }) => {
+				try {
+					// Convert base64 to binary data
+					const byteString = atob(fileBase64);
+					const byteArrays = [];
+					
+					for (let offset = 0; offset < byteString.length; offset += 1024) {
+						const slice = byteString.slice(offset, offset + 1024);
+						const byteNumbers = new Array(slice.length);
+						for (let i = 0; i < slice.length; i++) {
+							byteNumbers[i] = slice.charCodeAt(i);
+						}
+						byteArrays.push(new Uint8Array(byteNumbers));
+					}
+					
+					const fileBlob = new Blob(byteArrays, { type: fileContentType });
+					
+					const formData = new FormData();
+					formData.append("sessionId", sessionId);
+					formData.append("correlationId", correlationId);
+					formData.append("file", fileBlob, fileName);
+					if (userId) formData.append("userId", userId);
+					formData.append("timestamp", timestamp);
+
+					const response = await fetch("https://ai-stage-be.compliq.io/v1/actions/file-input", {
+						method: "POST",
+						headers: {
+							"Authorization": `x-api-key ${this.env.COMPLIQ_API_KEY}`,
+						},
+						body: formData,
+					});
+
+					if (!response.ok) {
+						const errorText = await response.text();
+						return {
+							content: [{ type: "text", text: `Error: ${response.status} - ${errorText}` }],
+						};
+					}
+
+					const result = await response.json();
+					return {
+						content: [{ type: "text", text: JSON.stringify(result) }],
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Error: ${error.message}` }],
+					};
 				}
-				return { content: [{ type: "text", text: String(result) }] };
+			}
+		);
+
+		// Tool 3: Intermediate Results Receiving - Optional
+		this.server.tool(
+			"intermediateResults",
+			{
+				sessionId: z.string().max(100).describe("Session identifier"),
+				correlationId: z.string().max(100).describe("Correlation ID"),
+				resourceName: z.string().describe("Name of the resource used"),
+				content: z.string().max(40000).optional().describe("Resource response in plain text"),
+				fileBase64: z.string().optional().describe("Base64 encoded file data"),
+				fileName: z.string().optional().describe("Name of the file"),
+				fileContentType: z.string().optional().describe("Content type of the file (png, jpeg, mp3, mp4, docx, pdf, csv, xml, ogg)"),
+				userId: z.string().max(100).describe("User ID"),
+				timestamp: z.string().describe("Intermediate result timestamp (MM-DD-YYYY HH:MM:SS)"),
+			},
+			async ({ sessionId, correlationId, resourceName, content, fileBase64, fileName, fileContentType, userId, timestamp }) => {
+				try {
+					const formData = new FormData();
+					formData.append("sessionId", sessionId);
+					formData.append("correlationId", correlationId);
+					formData.append("resourceName", resourceName);
+					formData.append("userId", userId);
+					formData.append("timestamp", timestamp);
+					
+					// Either content or file must be provided
+					if (content) {
+						formData.append("content", content);
+					} else if (fileBase64 && fileName && fileContentType) {
+						// Convert base64 to binary data
+						const byteString = atob(fileBase64);
+						const byteArrays = [];
+						
+						for (let offset = 0; offset < byteString.length; offset += 1024) {
+							const slice = byteString.slice(offset, offset + 1024);
+							const byteNumbers = new Array(slice.length);
+							for (let i = 0; i < slice.length; i++) {
+								byteNumbers[i] = slice.charCodeAt(i);
+							}
+							byteArrays.push(new Uint8Array(byteNumbers));
+						}
+						
+						const fileBlob = new Blob(byteArrays, { type: fileContentType });
+						formData.append("file", fileBlob, fileName);
+					} else {
+						return {
+							content: [{ type: "text", text: "Error: Either content or file (with fileName and fileContentType) must be provided" }],
+						};
+					}
+
+					const response = await fetch("https://ai-stage-be.compliq.io/v1/actions/resources-used", {
+						method: "POST",
+						headers: {
+							"Authorization": `x-api-key ${this.env.COMPLIQ_API_KEY}`,
+						},
+						body: formData,
+					});
+
+					if (!response.ok) {
+						const errorText = await response.text();
+						return {
+							content: [{ type: "text", text: `Error: ${response.status} - ${errorText}` }],
+						};
+					}
+
+					const result = await response.json();
+					return {
+						content: [{ type: "text", text: JSON.stringify(result) }],
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Error: ${error.message}` }],
+					};
+				}
+			}
+		);
+
+		// Tool 4: Processing Result (Answer) - Mandatory
+		this.server.tool(
+			"processingResult",
+			{
+				sessionId: z.string().max(100).describe("Session identifier"),
+				correlationId: z.string().max(100).describe("Correlation ID"),
+				processingTime: z.string().describe("Time spent by the third-party system (HH:MM:SS)"),
+				content: z.string().max(40000).optional().describe("Answer in plain text"),
+				fileBase64: z.string().optional().describe("Base64 encoded file data"),
+				fileName: z.string().optional().describe("Name of the file"),
+				fileContentType: z.string().optional().describe("Content type of the file (png, jpeg, mp3, mp4, docx, pdf, csv, xml, ogg)"),
+				userId: z.string().max(100).describe("User ID"),
+				timestamp: z.string().describe("Final result timestamp (MM-DD-YYYY HH:MM:SS)"),
+			},
+			async ({ sessionId, correlationId, processingTime, content, fileBase64, fileName, fileContentType, userId, timestamp }) => {
+				try {
+					const formData = new FormData();
+					formData.append("sessionId", sessionId);
+					formData.append("correlationId", correlationId);
+					formData.append("processingTime", processingTime);
+					formData.append("userId", userId);
+					formData.append("timestamp", timestamp);
+					
+					// Either content or file must be provided
+					if (content) {
+						formData.append("content", content);
+					} else if (fileBase64 && fileName && fileContentType) {
+						// Convert base64 to binary data
+						const byteString = atob(fileBase64);
+						const byteArrays = [];
+						
+						for (let offset = 0; offset < byteString.length; offset += 1024) {
+							const slice = byteString.slice(offset, offset + 1024);
+							const byteNumbers = new Array(slice.length);
+							for (let i = 0; i < slice.length; i++) {
+								byteNumbers[i] = slice.charCodeAt(i);
+							}
+							byteArrays.push(new Uint8Array(byteNumbers));
+						}
+						
+						const fileBlob = new Blob(byteArrays, { type: fileContentType });
+						formData.append("file", fileBlob, fileName);
+					} else {
+						return {
+							content: [{ type: "text", text: "Error: Either content or file (with fileName and fileContentType) must be provided" }],
+						};
+					}
+
+					const response = await fetch("https://ai-stage-be.compliq.io/v1/actions/output", {
+						method: "POST",
+						headers: {
+							"Authorization": `x-api-key ${this.env.COMPLIQ_API_KEY}`,
+						},
+						body: formData,
+					});
+
+					if (!response.ok) {
+						const errorText = await response.text();
+						return {
+							content: [{ type: "text", text: `Error: ${response.status} - ${errorText}` }],
+						};
+					}
+
+					const result = await response.json();
+					return {
+						content: [{ type: "text", text: JSON.stringify(result) }],
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Error: ${error.message}` }],
+					};
+				}
 			}
 		);
 	}
