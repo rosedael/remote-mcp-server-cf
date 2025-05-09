@@ -15,17 +15,26 @@
 	},
 	"migrations": [
 		{
-			"new_sqlite_classes": ["MyMCP"],
-			"tag": "v1"
+			"tag": "v1",
+			"new_classes": ["MyMCP"]
 		}
 	],
 	"durable_objects": {
 		"bindings": [
 			{
+				"name": "MCP_OBJECT",
 				"class_name": "MyMCP",
-				"name": "MCP_OBJECT"
+				"script_name": "remote-mcp-server-cf"
 			}
 		]
+	},
+	"minify": false,
+	"tsconfig": "./tsconfig.json",
+	"define": {
+		"process.env.NODE_ENV": "\"production\""
+	},
+	"triggers": {
+		"crons": []
 	},
 	"observability": {
 		"enabled": true
