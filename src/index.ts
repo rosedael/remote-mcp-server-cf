@@ -19,6 +19,21 @@ interface ToolParams {
 	processingTime?: string;
 }
 
+// Helper function to add CORS headers to any response
+function addCorsHeaders(response: Response): Response {
+	const headers = new Headers(response.headers);
+	headers.set('Access-Control-Allow-Origin', '*');
+	headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+	headers.set('Access-Control-Max-Age', '86400');
+
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers
+	});
+}
+
 export class MyMCP extends McpAgent<Env> {
 	server = new McpServer({
 		name: "COMPLiQ MCP Server",
@@ -318,29 +333,45 @@ export default {
 
 		// Add some basic request logging
 		console.log(`Received request to ${url.pathname}`);
+		
+		// Handle CORS preflight requests
+		if (request.method === 'OPTIONS') {
+			return new Response(null, {
+				headers: {
+					'Access-Control-Allow-Origin': '*',
+					'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+					'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+					'Access-Control-Max-Age': '86400',
+				},
+			});
+		}
 
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
 			// @ts-ignore
-			return MyMCP.serveSSE("/sse").fetch(request, env, ctx);
+			const response = MyMCP.serveSSE("/sse").fetch(request, env, ctx);
+			// Add CORS headers to the SSE response
+			return response.then(addCorsHeaders);
 		}
 
 		if (url.pathname === "/mcp") {
 			// @ts-ignore
-			return MyMCP.serve("/mcp").fetch(request, env, ctx);
+			const response = MyMCP.serve("/mcp").fetch(request, env, ctx);
+			// Add CORS headers to the MCP response
+			return response.then(addCorsHeaders);
 		}
 
 		// Add a health check endpoint
 		if (url.pathname === "/health") {
-			return new Response(JSON.stringify({ 
+			return addCorsHeaders(new Response(JSON.stringify({ 
 				status: "ok",
 				timestamp: new Date().toISOString(),
 				hasApiKey: !!env.COMPLIQ_API_KEY 
 			}), {
 				status: 200,
 				headers: { "Content-Type": "application/json" }
-			});
+			}));
 		}
 
-		return new Response("Not found", { status: 404 });
+		return addCorsHeaders(new Response("Not found", { status: 404 }));
 	},
 };
