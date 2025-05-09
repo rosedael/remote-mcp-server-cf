@@ -4,6 +4,8 @@ import { z } from "zod";
 
 export interface Env {
 	COMPLIQ_API_KEY: string;
+	// Add explicit Durable Objects binding
+	MCP_OBJECT: DurableObjectNamespace;
 }
 
 interface ToolParams {
@@ -43,6 +45,7 @@ export class MyMCP extends McpAgent<Env> {
 	async init() {
 		console.log("Initializing COMPLiQ MCP Server");
 		console.log("API key exists:", !!this.env.COMPLIQ_API_KEY);
+		console.log("Durable Object binding exists:", !!this.env.MCP_OBJECT);
 
 		// Tool 1: Input Prompt (Request) - Mandatory
 		this.server.tool(
@@ -361,6 +364,7 @@ export default {
 
 		// Add some basic request logging
 		console.log(`Received request to ${url.pathname}, method: ${request.method}`);
+		console.log("env.MCP_OBJECT exists:", !!env.MCP_OBJECT);
 		
 		// Handle CORS preflight requests
 		if (request.method === 'OPTIONS') {
@@ -379,11 +383,50 @@ export default {
 			return handleSSE(request, env);
 		}
 
+		// Special simple endpoint to directly test Durable Objects binding
+		if (url.pathname === "/do-test") {
+			try {
+				// Try to create a Durable Object ID (this will fail if the binding is invalid)
+				const id = env.MCP_OBJECT.idFromName("test");
+				const stub = env.MCP_OBJECT.get(id);
+				
+				return new Response(JSON.stringify({
+					success: true,
+					message: "Durable Object binding is properly configured",
+					time: new Date().toISOString()
+				}), {
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			} catch (error: any) {
+				console.error("DO Test Error:", error);
+				return new Response(JSON.stringify({
+					success: false,
+					error: error.message || "Unknown error",
+					time: new Date().toISOString()
+				}), {
+					status: 500,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+		}
+
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
 			try {
 				console.log("Handling SSE request with McpAgent");
+				
+				// Create a custom handler with explicit access to the MCP_OBJECT binding
+				const handler = MyMCP.serveSSE("/sse", { 
+					durableObjectNamespace: env.MCP_OBJECT 
+				});
+				
 				// @ts-ignore
-				const mcpResponse = MyMCP.serveSSE("/sse").fetch(request, env, ctx);
+				const mcpResponse = handler.fetch(request, env, ctx);
 				
 				// Make sure we're handling promises correctly
 				if (mcpResponse instanceof Promise) {
@@ -391,8 +434,8 @@ export default {
 						console.log("SSE response status:", response.status);
 						return addCorsHeaders(response);
 					}).catch(error => {
-						console.error("Error in SSE handling:", error);
-						return new Response(`SSE error: ${error.message}`, { 
+						console.error("Error in SSE handling:", error instanceof Error ? error.message : String(error));
+						return new Response(`SSE error: ${error instanceof Error ? error.message : String(error)}`, { 
 							status: 500,
 							headers: {
 								'Access-Control-Allow-Origin': '*',
@@ -405,8 +448,8 @@ export default {
 					return addCorsHeaders(mcpResponse);
 				}
 			} catch (error) {
-				console.error("Exception in SSE handler:", error);
-				return new Response(`SSE handler exception: ${error.message}`, { 
+				console.error("Exception in SSE handler:", error instanceof Error ? error.message : String(error));
+				return new Response(`SSE handler exception: ${error instanceof Error ? error.message : String(error)}`, { 
 					status: 500,
 					headers: {
 						'Access-Control-Allow-Origin': '*',
@@ -419,8 +462,14 @@ export default {
 		if (url.pathname === "/mcp") {
 			try {
 				console.log("Handling MCP request");
+				
+				// Create a custom handler with explicit access to the MCP_OBJECT binding
+				const handler = MyMCP.serve("/mcp", { 
+					durableObjectNamespace: env.MCP_OBJECT 
+				});
+				
 				// @ts-ignore
-				const mcpResponse = MyMCP.serve("/mcp").fetch(request, env, ctx);
+				const mcpResponse = handler.fetch(request, env, ctx);
 				
 				// Make sure we're handling promises correctly
 				if (mcpResponse instanceof Promise) {
@@ -428,8 +477,8 @@ export default {
 						console.log("MCP response status:", response.status);
 						return addCorsHeaders(response);
 					}).catch(error => {
-						console.error("Error in MCP handling:", error);
-						return new Response(`MCP error: ${error.message}`, { 
+						console.error("Error in MCP handling:", error instanceof Error ? error.message : String(error));
+						return new Response(`MCP error: ${error instanceof Error ? error.message : String(error)}`, { 
 							status: 500,
 							headers: {
 								'Access-Control-Allow-Origin': '*',
@@ -442,8 +491,8 @@ export default {
 					return addCorsHeaders(mcpResponse);
 				}
 			} catch (error) {
-				console.error("Exception in MCP handler:", error);
-				return new Response(`MCP handler exception: ${error.message}`, { 
+				console.error("Exception in MCP handler:", error instanceof Error ? error.message : String(error));
+				return new Response(`MCP handler exception: ${error instanceof Error ? error.message : String(error)}`, { 
 					status: 500,
 					headers: {
 						'Access-Control-Allow-Origin': '*',
@@ -458,7 +507,8 @@ export default {
 			return addCorsHeaders(new Response(JSON.stringify({ 
 				status: "ok",
 				timestamp: new Date().toISOString(),
-				hasApiKey: !!env.COMPLIQ_API_KEY 
+				hasApiKey: !!env.COMPLIQ_API_KEY,
+				hasDurableObjectBinding: !!env.MCP_OBJECT
 			}), {
 				status: 200,
 				headers: { "Content-Type": "application/json" }
