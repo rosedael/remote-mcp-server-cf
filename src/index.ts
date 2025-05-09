@@ -24,7 +24,7 @@ function addCorsHeaders(response: Response): Response {
 	const headers = new Headers(response.headers);
 	headers.set('Access-Control-Allow-Origin', '*');
 	headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-	headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+	headers.set('Access-Control-Allow-Headers', '*');
 	headers.set('Access-Control-Max-Age', '86400');
 
 	return new Response(response.body, {
@@ -327,12 +327,40 @@ export class MyMCP extends McpAgent<Env> {
 	}
 }
 
+// Function to handle SSE connections directly
+async function handleSSE(request: Request, env: Env) {
+	// Add proper SSE headers
+	const headers = new Headers({
+		'Content-Type': 'text/event-stream',
+		'Cache-Control': 'no-cache',
+		'Connection': 'keep-alive',
+		'Access-Control-Allow-Origin': '*',
+		'Access-Control-Allow-Headers': '*',
+		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+	});
+
+	// Create a new ReadableStream for SSE
+	const stream = new ReadableStream({
+		start(controller) {
+			// Send an initial connection established message
+			const encoder = new TextEncoder();
+			controller.enqueue(encoder.encode("event: connected\ndata: {}\n\n"));
+			
+			// We'll pass this stream to McpAgent to handle the actual MCP protocol
+			// This is just establishing the SSE connection
+		}
+	});
+
+	// Create and return SSE response
+	return new Response(stream, { headers });
+}
+
 export default {
 	fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
 
 		// Add some basic request logging
-		console.log(`Received request to ${url.pathname}`);
+		console.log(`Received request to ${url.pathname}, method: ${request.method}`);
 		
 		// Handle CORS preflight requests
 		if (request.method === 'OPTIONS') {
@@ -340,24 +368,89 @@ export default {
 				headers: {
 					'Access-Control-Allow-Origin': '*',
 					'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-					'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+					'Access-Control-Allow-Headers': '*',
 					'Access-Control-Max-Age': '86400',
 				},
 			});
 		}
 
+		// Add a direct handler for SSE connection test
+		if (url.pathname === "/sse-test") {
+			return handleSSE(request, env);
+		}
+
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			// @ts-ignore
-			const response = MyMCP.serveSSE("/sse").fetch(request, env, ctx);
-			// Add CORS headers to the SSE response
-			return response.then(addCorsHeaders);
+			try {
+				console.log("Handling SSE request with McpAgent");
+				// @ts-ignore
+				const mcpResponse = MyMCP.serveSSE("/sse").fetch(request, env, ctx);
+				
+				// Make sure we're handling promises correctly
+				if (mcpResponse instanceof Promise) {
+					return mcpResponse.then(response => {
+						console.log("SSE response status:", response.status);
+						return addCorsHeaders(response);
+					}).catch(error => {
+						console.error("Error in SSE handling:", error);
+						return new Response(`SSE error: ${error.message}`, { 
+							status: 500,
+							headers: {
+								'Access-Control-Allow-Origin': '*',
+								'Content-Type': 'text/plain'
+							}
+						});
+					});
+				} else {
+					console.log("SSE direct response status:", mcpResponse.status);
+					return addCorsHeaders(mcpResponse);
+				}
+			} catch (error) {
+				console.error("Exception in SSE handler:", error);
+				return new Response(`SSE handler exception: ${error.message}`, { 
+					status: 500,
+					headers: {
+						'Access-Control-Allow-Origin': '*',
+						'Content-Type': 'text/plain'
+					}
+				});
+			}
 		}
 
 		if (url.pathname === "/mcp") {
-			// @ts-ignore
-			const response = MyMCP.serve("/mcp").fetch(request, env, ctx);
-			// Add CORS headers to the MCP response
-			return response.then(addCorsHeaders);
+			try {
+				console.log("Handling MCP request");
+				// @ts-ignore
+				const mcpResponse = MyMCP.serve("/mcp").fetch(request, env, ctx);
+				
+				// Make sure we're handling promises correctly
+				if (mcpResponse instanceof Promise) {
+					return mcpResponse.then(response => {
+						console.log("MCP response status:", response.status);
+						return addCorsHeaders(response);
+					}).catch(error => {
+						console.error("Error in MCP handling:", error);
+						return new Response(`MCP error: ${error.message}`, { 
+							status: 500,
+							headers: {
+								'Access-Control-Allow-Origin': '*',
+								'Content-Type': 'text/plain'
+							}
+						});
+					});
+				} else {
+					console.log("MCP direct response status:", mcpResponse.status);
+					return addCorsHeaders(mcpResponse);
+				}
+			} catch (error) {
+				console.error("Exception in MCP handler:", error);
+				return new Response(`MCP handler exception: ${error.message}`, { 
+					status: 500,
+					headers: {
+						'Access-Control-Allow-Origin': '*',
+						'Content-Type': 'text/plain'
+					}
+				});
+			}
 		}
 
 		// Add a health check endpoint
