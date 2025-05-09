@@ -10,9 +10,6 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"vars": {
-		"COMPLIQ_API_KEY": ""
-	},
 	"migrations": [
 		{
 			"tag": "v1",

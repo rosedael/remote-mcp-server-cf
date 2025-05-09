@@ -58,19 +58,62 @@ export class MyMCP {
 
 	async handleSse(request: Request): Promise<Response> {
 		try {
+			// Create a stream to send SSE messages to client
 			const { readable, writable } = new TransformStream();
 			const writer = writable.getWriter();
+			const encoder = new TextEncoder();
 			
 			// Send initial SSE headers to client
-			const encoder = new TextEncoder();
 			await writer.write(encoder.encode("event: connected\ndata: connected\n\n"));
 			
-			// You would implement full SSE functionality here
+			// Process the request through the MCP server
+			// This lets the server know a client has connected
+			try {
+				// Initialize the SSE connection in the MCP server
+				this.server.handleSse({
+					write: async (event, data) => {
+						// Send the event and data to the client
+						const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+						await writer.write(encoder.encode(message));
+					},
+					close: async () => {
+						try {
+							await writer.close();
+						} catch (error) {
+							console.error("Error closing SSE writer:", error);
+						}
+					}
+				});
+				
+				// Send a heartbeat every 30 seconds to keep the connection alive
+				const heartbeatInterval = setInterval(async () => {
+					try {
+						await writer.write(encoder.encode("event: heartbeat\ndata: ping\n\n"));
+					} catch (error) {
+						console.error("Heartbeat error, closing SSE connection:", error);
+						clearInterval(heartbeatInterval);
+						try {
+							await writer.close();
+						} catch {}
+					}
+				}, 30000);
+				
+				// Set up connection teardown
+				request.signal.addEventListener("abort", () => {
+					clearInterval(heartbeatInterval);
+					writer.close().catch(console.error);
+				});
+			} catch (error) {
+				console.error("Error in SSE setup:", error);
+				await writer.write(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: String(error) })}\n\n`));
+				await writer.close();
+			}
 			
+			// Return the readable stream as an SSE response
 			return new Response(readable, {
 				headers: {
 					"Content-Type": "text/event-stream",
-					"Cache-Control": "no-cache",
+					"Cache-Control": "no-cache, no-transform",
 					"Connection": "keep-alive",
 				},
 			});
@@ -88,21 +131,30 @@ export class MyMCP {
 			// Parse the request as JSON
 			const body = await request.json();
 			
-			// Process the MCP request (basic mock response)
-			const response = {
-				status: "success",
-				message: "MCP request processed",
-				data: body
-			};
+			// Process the MCP request through the server
+			const result = await this.server.handleMcp(body);
 			
-			return new Response(JSON.stringify(response), {
+			// Return the result
+			return new Response(JSON.stringify(result), {
 				headers: { "Content-Type": "application/json" }
 			});
 		} catch (error: any) {
 			console.error("MCP error:", error);
-			return new Response(`MCP error: ${error.message || String(error)}`, { 
+			
+			// Return a properly formatted JSON-RPC error response
+			const errorResponse = {
+				jsonrpc: "2.0",
+				error: {
+					code: -32603,  // Internal error code
+					message: error.message || "Internal error",
+					data: { stack: error.stack }
+				},
+				id: null
+			};
+			
+			return new Response(JSON.stringify(errorResponse), { 
 				status: 500,
-				headers: { "Content-Type": "text/plain" },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 	}
@@ -135,6 +187,20 @@ export class MyMCP {
 	async initServer() {
 		console.log("Initializing COMPLiQ MCP Server");
 		
+		try {
+            // Actual API key value (will be available when the request is processed)
+            const apiKey = this.env.COMPLIQ_API_KEY;
+            console.log("API key exists in env object:", apiKey !== undefined);
+            
+            if (typeof apiKey === 'string' && apiKey.length > 0) {
+                console.log("API key first 5 chars:", apiKey.substring(0, 5));
+            } else {
+                console.log("API key is not a valid string");
+            }
+        } catch (error) {
+            console.error("Error accessing API key:", error);
+        }
+		
 		// Initialize COMPLiQ MCP tools
 		this.server.tool(
 			"inputPrompt",
@@ -154,10 +220,13 @@ export class MyMCP {
 					formData.append("userId", userId);
 					formData.append("timestamp", timestamp);
 
+					// Get the API key from env
+					const apiKey = this.env.COMPLIQ_API_KEY || "";
+
 					const response = await fetch("https://ai-stage-be.compliq.io/v1/actions/task-input", {
 						method: "POST",
 						headers: {
-							"Authorization": `x-api-key ${this.env.COMPLIQ_API_KEY}`,
+							"Authorization": `x-api-key ${apiKey}`,
 						},
 						body: formData,
 					});
@@ -255,6 +324,31 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		try {
 			const url = new URL(request.url);
+			console.log("Worker request:", request.method, url.pathname);
+			
+			// Check available environment keys
+			const envKeys = Object.keys(env);
+			console.log("Environment keys:", envKeys);
+			
+			// Specifically check for API key
+			const hasApiKey = envKeys.includes("COMPLIQ_API_KEY");
+			console.log("API key exists in env keys:", hasApiKey);
+			
+			try {
+				// Try to access the API key value (may be undefined)
+				const apiKeyValue = env.COMPLIQ_API_KEY;
+				const apiKeyType = typeof apiKeyValue;
+				const hasRealValue = apiKeyType === 'string' && apiKeyValue.length > 0;
+				
+				console.log("API key type:", apiKeyType);
+				console.log("API key has real value:", hasRealValue);
+				
+				if (hasRealValue) {
+					console.log("API key first 5 chars:", apiKeyValue.substring(0, 5));
+				}
+			} catch (error) {
+				console.error("Error accessing API key:", error);
+			}
 			
 			// Handle CORS preflight
 			if (request.method === "OPTIONS") {
@@ -270,12 +364,35 @@ export default {
 			
 			// Health check endpoint
 			if (url.pathname === "/health") {
+				// Test to see if API key is accessible
+				let apiKeyValue = "undefined";
+				let apiKeyType = "undefined";
+				let apiKeyFirstChars = null;
+				
+				try {
+					apiKeyValue = env.COMPLIQ_API_KEY;
+					apiKeyType = typeof apiKeyValue;
+					
+					if (apiKeyType === 'string' && apiKeyValue.length > 0) {
+						apiKeyFirstChars = apiKeyValue.substring(0, 5) + "...";
+					}
+				} catch (error) {
+					console.error("Error in health check:", error);
+				}
+				
 				return new Response(
 					JSON.stringify({
 						status: "ok",
 						timestamp: new Date().toISOString(),
-						hasApiKey: !!env.COMPLIQ_API_KEY,
-						hasMcpObjectBinding: !!env.MCP_OBJECT,
+						// Environment inspection
+						envKeys: envKeys,
+						hasApiKeyInKeys: hasApiKey,
+						// API key inspection
+						apiKeyType: apiKeyType,
+						apiKeyLength: apiKeyType === 'string' ? apiKeyValue.length : 0,
+						apiKeyFirstChars: apiKeyFirstChars,
+						// MCP binding
+						hasMcpObjectBinding: !!env.MCP_OBJECT
 					}),
 					{
 						status: 200,
